@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vehículos en Movimiento - Círculo por Tipo</title>
+
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        #cesiumContainer {
+            width: 100%;
+            height: 100vh;
+            display: block;
+        }
+
+        #legend {
+            position: absolute;
+            top: 150px;
+            right: 10px;
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            border-radius: 8px;
+            font-family: Arial, sans-serif;
+            z-index: 0;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            border-radius: 50%;
+        }
+
+        /* Tooltip styling */
+        #tooltip {
+            position: absolute;
+            padding: 5px;
+            background-color: rgba(0, 0, 0, 0.75);
+            color: white;
+            border-radius: 3px;
+            pointer-events: none;
+            font-size: 12px;
+            font-family: Arial, sans-serif;
+            display: none;
+            z-index: 1;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="cesiumContainer"></div>
+
+    <div id="legend">
+        <h3>PM100</h3>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: rgba(0, 255, 0, 0.7);"></div>
+            <span>PM100 < 500</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: rgba(255, 255, 0, 0.7);"></div>
+            <span>PM100 < 800</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: rgba(255, 0, 0, 0.7);"></div>
+            <span>PM100 < 1200</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: rgba(128, 0, 128, 0.7);"></div>
+            <span>PM100 ≥ 1200</span>
+        </div>
+    </div>
+
+    <!-- Tooltip for geofence names -->
+    <div id="tooltip"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.1.3/socket.io.js"></script>
+
+    <script>
+        const viewer = new Cesium.Viewer('cesiumContainer', {
+            imageryProvider: new Cesium.UrlTemplateImageryProvider({
+                url: 'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                maximumLevel: 19
+            }),
+            baseLayerPicker: true,
+            shouldAnimate: true,
+            timeline: false,
+            animation: false,
+            scene3DOnly: true
+        });
+
+        viewer.scene.requestRenderMode = true;
+        viewer.scene.maximumRenderTimeChange = Infinity;
+
+        const vehicles = {};
+        const MAX_LINE_LENGTH = 200;
+        let selectedEntity = null;
+
+        const socket = io('ws://54.161.120.197:5050/');
+
+        socket.on('connect', () => {
+            console.log('Conectado al WebSocket.');
+        });
+
+        socket.on('update_czml', (mensaje) => {
+            try {
+                console.log('Mensaje recibido:', mensaje);
+                const { id, datos } = mensaje;
+                updateOrCreateVehicle(id, datos);
+            } catch (error) {
+                console.error('Error al procesar el mensaje:', error);
+            }
+        });
+
+        function updateOrCreateVehicle(id, datos) {
+            const type = id.split('-')[0];
+            const lastData = datos[datos.length - 1];
+            const { longitude, latitude, altitude_m = 0, course = 0, speed_kmh = 0, pm100 = 0 } = lastData;
+
+            if (!isValidCoordinates(longitude, latitude)) return;
+
+            const modelUri = type === 'REG' ? '/static/ALJIBE.gltf' : '/static/TOLVA.gltf';
+
+            if (!vehicles[id]) {
+                vehicles[id] = {
+                    positions: [],
+                    entity: viewer.entities.add({
+                        id: `vehicle-${id}`,
+                        position: Cesium.Cartesian3.fromDegrees(longitude, latitude, altitude_m),
+                        model: {
+                            uri: modelUri,
+                            scale: 0.1,
+                            minimumPixelSize: 64,
+                            maximumScale: 5
+                        },
+                        label: {
+                            text: `${type}\nVelocidad: ${speed_kmh.toFixed(2)} km/h\nPM: ${pm100.toFixed(2)} µg/m³`,
+                            font: "15px sans-serif",
+                            fillColor: Cesium.Color.WHITE,
+                            showBackground: true,
+                            backgroundColor: Cesium.Color.BLACK.withAlpha(0.5),
+                            horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+                            verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                            pixelOffset: new Cesium.Cartesian2(0, -15),
+                            show: false
+                        }
+                    }),
+                    lineEntities: []
+                };
+            }
+
+            updateVehiclePosition(id, datos);
+        }
+
+        function updateVehiclePosition(id, datos) {
+            const vehicle = vehicles[id];
+            vehicle.positions = datos.map(d => ({
+                position: Cesium.Cartesian3.fromDegrees(d.longitude, d.latitude, d.altitude_m || 0),
+                pm100: d.pm100 || 0
+            }));
+
+            const lastPosition = vehicle.positions[vehicle.positions.length - 1].position;
+            vehicle.entity.position = new Cesium.ConstantPositionProperty(lastPosition);
+
+            const heading = Cesium.Math.toRadians(datos[datos.length - 1].course);
+            vehicle.entity.orientation = new Cesium.ConstantProperty(
+                Cesium.Transforms.headingPitchRollQuaternion(
+                    lastPosition, new Cesium.HeadingPitchRoll(heading, 0, 0)
+                )
+            );
+
+            drawDashedLine(vehicle);
+            viewer.scene.requestRender();
+        }
+
+        function drawDashedLine(vehicle) {
+            vehicle.lineEntities.forEach(entity => viewer.entities.remove(entity));
+            vehicle.lineEntities = [];
+
+            for (let i = 1; i < vehicle.positions.length; i++) {
+                const start = vehicle.positions[i - 1].position;
+                const end = vehicle.positions[i].position;
+                const pm100 = vehicle.positions[i].pm100;
+
+                const color = getPolylineColor(pm100);
+
+                if (color) {
+                    const lineEntity = viewer.entities.add({
+                        polyline: {
+                            positions: [start, end],
+                            width: 5,
+                            material: color
+                        }
+                    });
+
+                    vehicle.lineEntities.push(lineEntity);
+                }
+            }
+        }
+
+        function getPolylineColor(pm100) {
+            if (pm100 === -1 || pm100 === 0 || pm100 === 3999) return null;
+            if (pm100 === -50) {
+                const colors = [Cesium.Color.BLUE.withAlpha(0.7), Cesium.Color.GREEN.withAlpha(0.7),
+                                Cesium.Color.YELLOW.withAlpha(0.7), Cesium.Color.RED.withAlpha(0.7),
+                                Cesium.Color.PURPLE.withAlpha(0.7)];
+                return colors[Math.floor(Math.random() * colors.length)];
+            }
+            if (pm100 > 0 && pm100 < 500) return Cesium.Color.GREEN.withAlpha(0.7);
+            if (pm100 < 800) return Cesium.Color.YELLOW.withAlpha(0.7);
+            if (pm100 < 1200) return Cesium.Color.RED.withAlpha(0.7);
+            return Cesium.Color.PURPLE.withAlpha(0.7);
+        }
+
+        function isValidCoordinates(longitude, latitude) {
+            return !isNaN(longitude) && !isNaN(latitude) &&
+                   longitude >= -180 && longitude <= 180 &&
+                   latitude >= -90 && latitude <= 90;
+        }
+
+        viewer.screenSpaceEventHandler.setInputAction((click) => {
+            const pickedObject = viewer.scene.pick(click.position);
+
+            if (Cesium.defined(pickedObject) && Cesium.defined(pickedObject.id) && Cesium.defined(pickedObject.id.label)) {
+                if (selectedEntity && Cesium.defined(selectedEntity.label)) {
+                    selectedEntity.label.show = false;
+                }
+                selectedEntity = pickedObject.id;
+                selectedEntity.label.show = true;
+            } else if (selectedEntity && Cesium.defined(selectedEntity.label)) {
+                selectedEntity.label.show = false;
+                selectedEntity = null;
+            }
+        }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+        viewer.camera.flyTo({
+            destination: Cesium.Cartesian3.fromDegrees(-69.87415, -22.62680, 1950),
+            duration: 2.0,
+            orientation: {
+                heading: Cesium.Math.toRadians(90),
+                pitch: Cesium.Math.toRadians(-25),
+                roll: 0.0
+            }
+        });
+
+        // Tooltip element for geofences
+        const tooltip = document.getElementById('tooltip');
+
+        // Función para cargar y agregar geofences desde la API
+        fetch('https://proyecto-antucoya.uc.r.appspot.com/api/getGeofence')
+            .then(response => response.json())
+            .then(data => addGeofencesToCesium(data));
+
+        function addGeofencesToCesium(data) {
+            const features = data.data[0].row_to_json.features;
+
+            features.forEach(feature => {
+                const coordinates = feature.geometry.coordinates[0];
+                const positions = coordinates.map(coord => Cesium.Cartesian3.fromDegrees(coord[0], coord[1]));
+                
+                const geofence = viewer.entities.add({
+                    polygon: {
+                        hierarchy: positions,
+                        material: Cesium.Color.BLUE.withAlpha(0.3),
+                        outline: true,
+                        outlineColor: Cesium.Color.BLACK
+                    },
+                    properties: feature.properties
+                });
+
+                geofence.name = feature.properties.ubicacion; // Set the name for tooltip display
+            });
+        }
+
+        // Mouse move event handler for tooltip
+        viewer.screenSpaceEventHandler.setInputAction((movement) => {
+            const pickedObject = viewer.scene.pick(movement.endPosition);
+
+            if (Cesium.defined(pickedObject) && Cesium.defined(pickedObject.id) && pickedObject.id.properties) {
+                const ubicacion = pickedObject.id.properties.ubicacion.getValue();
+                tooltip.style.display = 'block';
+                tooltip.style.left = movement.endPosition.x + 10 + 'px';
+                tooltip.style.top = movement.endPosition.y + 10 + 'px';
+                tooltip.innerText = ubicacion;
+            } else {
+                tooltip.style.display = 'none';
+            }
+        }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+    </script>
+</body>
+
+</html>
